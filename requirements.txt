@@ -1,0 +1,5 @@
+loguru==0.7.2
+nodeenv==1.8.0
+numpy==1.26.4
+opencv-python==4.9.0.80
+pyright==1.1.352

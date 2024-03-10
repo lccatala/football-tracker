@@ -99,7 +99,24 @@ class Predictor:
             for box in result.boxes
         ]
 
-    def _crop_image(self, frame: MatLike, box: Boxes):
+    @dataclass
+    class ImageCrop:
+        frame: Image.Image
+        x1: int
+        y1: int
+        x2: int
+        y2: int
+
+        def __init__(self, frame: Image.Image, positions: tuple[int, int, int, int]) -> None:
+            self.frame = frame
+
+            self.x1 = positions[0]
+            self.y1 = positions[1]
+            self.x2 = positions[2]
+            self.y2 = positions[3]
+
+            
+    def _crop_image(self, frame: MatLike, box: Boxes) -> ImageCrop:
         coords = box.xyxy[0]
         x1 = int(coords[0])
         y1 = int(coords[1])
@@ -108,7 +125,8 @@ class Predictor:
 
         cropped = frame[y1:y2, x1:x2]
         cropped_pil = Image.fromarray(cropped)
-        return cropped_pil
+        image_crop = self.ImageCrop(cropped_pil, (x1, y1, x2, y2))
+        return image_crop
 
     def process_video(self, video_path: str, output_path: str):
         os.makedirs(output_path, exist_ok=True)
@@ -122,20 +140,30 @@ class Predictor:
         for result in results:
             boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
             frame = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
-            cropped_images = [self._crop_image(frame, box) for box in boxes]
-            transformed = [resnet_transform(image) for image in cropped_images]
+
+            image_crops = [self._crop_image(frame, box) for box in boxes]
+            frames = [image_crop.frame for image_crop in image_crops]
+
+            transformed = [resnet_transform(image) for image in frames]
             transformed = torch.from_numpy(np.array(transformed))
             latent_representations = self.encoder(transformed)
-            print(self.clustering.labels_)
-            print(latent_representations)
+
             latent_representations = latent_representations.view(latent_representations.size(0), -1)
             latent_representations = latent_representations.detach().numpy()
             person_classes = self.clustering.predict(latent_representations)
             print(person_classes)
+            for i, image_crop in enumerate(image_crops):
+                color = (0, 255, 0)
+                if person_classes[i] == 1:
+                    color = (0, 0, 255)
 
-            # frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 5)
-            # cv2.imshow("", frame)
-            # cv2.waitKey(20)
+                frame = cv2.rectangle(
+                            result.orig_img, 
+                            (image_crop.x1, image_crop.y1), 
+                            (image_crop.x2, image_crop.y2), 
+                            color, 5)
+            cv2.imshow("", frame)
+            cv2.waitKey(20)
 
     def extract_person_boxes(self, video_path: str, output_path: str) -> None:
         os.makedirs(output_path, exist_ok=True)

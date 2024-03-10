@@ -60,6 +60,17 @@ class Autoencoder(nn.Module):
 YOLO_PERSON_CLASS = 0
 YOLO_BALL_CLASS = 32
 
+def is_referee(frame: MatLike) -> tuple[bool, float]:
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
+
+    total_pixels = frame_binary.size
+    black_pixels = total_pixels - cv2.countNonZero(frame_binary)
+    percentage_black = (black_pixels / total_pixels) * 100
+    referee = percentage_black > 7.0
+
+    return (referee, percentage_black)
+
 @dataclass
 class Predictor:
     def __init__(
@@ -101,13 +112,13 @@ class Predictor:
 
     @dataclass
     class ImageCrop:
-        frame: Image.Image
+        frame: MatLike
         x1: int
         y1: int
         x2: int
         y2: int
 
-        def __init__(self, frame: Image.Image, positions: tuple[int, int, int, int]) -> None:
+        def __init__(self, frame: MatLike, positions: tuple[int, int, int, int]) -> None:
             self.frame = frame
 
             self.x1 = positions[0]
@@ -124,46 +135,81 @@ class Predictor:
         y2 = int(coords[3])
 
         cropped = frame[y1:y2, x1:x2]
-        cropped_pil = Image.fromarray(cropped)
-        image_crop = self.ImageCrop(cropped_pil, (x1, y1, x2, y2))
+        image_crop = self.ImageCrop(cropped, (x1, y1, x2, y2))
         return image_crop
+
+    def _get_fifth_video_frames(self, video_path: str) -> list[np.ndarray]:
+        capture = cv2.VideoCapture(video_path)
+        
+        num_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frames = np.zeros((int(num_frames / 5)-1, frame_height, frame_width, 3), dtype=np.uint8)
+
+        for i in range(num_frames):
+            ret, frame = capture.read()
+            if not ret:
+                break
+            if i % 5 == 0:
+                frames[i//5] = frame
+        capture.release()
+
+        # OpenCV's frame count estimation can be wrong, so we trim the unused frames at the end
+        last_zeros_position = len(frames)
+        for i,f in enumerate(reversed(frames)):
+            if np.array_equal(f, np.zeros(f.shape)):
+                last_zeros_position = i
+            else:
+                break
+        frames = frames[:len(frames)-last_zeros_position-1]
+
+
+        return list(frames)
 
     def process_video(self, video_path: str, output_path: str):
         os.makedirs(output_path, exist_ok=True)
 
+        video_frames = self._get_fifth_video_frames(video_path)
+        print(f"Got an array of length {len(video_frames)}")
+        print("Converted")
+
         results = self.detection_model.predict(
-                video_path, 
+                video_frames, 
                 stream=True, 
                 classes=self.accepted_classes, 
                 device=self.device)
+        print("Predicted")
 
-        for result in results:
+        output_json_list = ["{“frame”: 5, “home_team”:5, “away_team”: 8, “refs”: 1, “ball_loc”:(90, 19, 30, 31)}"]
+        for frame_idx, result in enumerate(results):
             boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
-            frame = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
+            frame = result.orig_img
 
             image_crops = [self._crop_image(frame, box) for box in boxes]
-            frames = [image_crop.frame for image_crop in image_crops]
 
-            transformed = [resnet_transform(image) for image in frames]
-            transformed = torch.from_numpy(np.array(transformed))
-            latent_representations = self.encoder(transformed)
-
-            latent_representations = latent_representations.view(latent_representations.size(0), -1)
-            latent_representations = latent_representations.detach().numpy()
-            person_classes = self.clustering.predict(latent_representations)
-            print(person_classes)
-            for i, image_crop in enumerate(image_crops):
+            referee_count = 0
+            for image_crop in image_crops:
                 color = (0, 255, 0)
-                if person_classes[i] == 1:
+                referee, percentage_black = is_referee(image_crop.frame)
+                if referee:
                     color = (0, 0, 255)
+                    referee_count += 1
 
+                text = f"{percentage_black}%"
+                frame = cv2.putText(
+                            frame, 
+                            text, 
+                            (image_crop.x1, image_crop.y1 - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, 
+                            color)
                 frame = cv2.rectangle(
                             result.orig_img, 
                             (image_crop.x1, image_crop.y1), 
                             (image_crop.x2, image_crop.y2), 
                             color, 5)
             cv2.imshow("", frame)
-            cv2.waitKey(20)
+            cv2.waitKey(0)
 
     def extract_person_boxes(self, video_path: str, output_path: str) -> None:
         os.makedirs(output_path, exist_ok=True)

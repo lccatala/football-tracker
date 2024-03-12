@@ -60,6 +60,31 @@ class Autoencoder(nn.Module):
 YOLO_PERSON_CLASS = 0
 YOLO_BALL_CLASS = 32
 
+def get_prevalent_color(
+        frame: MatLike, 
+        upper_green: np.ndarray=np.array([50, 0, 80]),
+        lower_green: np.ndarray=np.array([80, 255,100]),
+    ) -> list[int]:
+
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask_lower = cv2.inRange(hsv_frame, np.array([0,0,0]), lower_green)
+    mask_upper = cv2.inRange(hsv_frame, upper_green, np.array([255, 255, 255]))
+    mask = cv2.bitwise_or(mask_lower, mask_upper)
+    masked_frame = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
+    cv2.imshow("", cv2.cvtColor(masked_frame, cv2.COLOR_HSV2BGR))
+    cv2.waitKey(0)
+
+    hist = cv2.calcHist([masked_frame], [0, 1, 2], None, [10, 10, 10], [1, 256, 1, 256, 1, 256])
+    max_count_idx = np.unravel_index(hist.argmax(), hist.shape)
+
+    b = int(max_count_idx[2] * 32)
+    g = int(max_count_idx[1] * 32)
+    r = int(max_count_idx[0] * 32)
+    bgr_color = [b, g, r]
+
+    return bgr_color
+
+
 def is_referee(frame: MatLike) -> tuple[bool, float]:
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
@@ -167,35 +192,37 @@ class Predictor:
         return list(frames)
 
     def process_video(self, video_path: str, output_path: str):
-        os.makedirs(output_path, exist_ok=True)
-
         video_frames = self._get_fifth_video_frames(video_path)
         print(f"Got an array of length {len(video_frames)}")
         print("Converted")
 
         results = self.detection_model.predict(
-                video_frames, 
+                video_frames[0], 
                 stream=True, 
                 classes=self.accepted_classes, 
                 device=self.device)
-        print("Predicted")
+        print("Detecting on video frames...")
 
-        output_json_list = ["{“frame”: 5, “home_team”:5, “away_team”: 8, “refs”: 1, “ball_loc”:(90, 19, 30, 31)}"]
+        output_json_list = []
         for frame_idx, result in enumerate(results):
+            home_team_count = 0
+            away_team_count = 0
+            referee_count = 0
+            ball_location = (90, 19, 30, 31)
+            
             boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
             frame = result.orig_img
 
             image_crops = [self._crop_image(frame, box) for box in boxes]
-
-            referee_count = 0
             for image_crop in image_crops:
                 color = (0, 255, 0)
                 referee, percentage_black = is_referee(image_crop.frame)
+                color = get_prevalent_color(image_crop.frame)
                 if referee:
-                    color = (0, 0, 255)
+                    # color = (0, 0, 255)
                     referee_count += 1
 
-                text = f"{percentage_black}%"
+                text = f"{color}"
                 frame = cv2.putText(
                             frame, 
                             text, 
@@ -210,6 +237,15 @@ class Predictor:
                             color, 5)
             cv2.imshow("", frame)
             cv2.waitKey(0)
+
+            json_line = f'{{"frame": {frame_idx*5}, "home_team":{home_team_count}, "away_team": {away_team_count}, "refs": {referee_count}, "ball_loc":{ball_location}}}'
+            output_json_list.append(json_line)
+
+        output_json = "\n".join(output_json_list)
+        with open(output_path, "w") as file:
+            file.write(output_json)
+
+
 
     def extract_person_boxes(self, video_path: str, output_path: str) -> None:
         os.makedirs(output_path, exist_ok=True)

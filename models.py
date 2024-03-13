@@ -14,6 +14,7 @@ from ultralytics.engine.results import Boxes
 import numpy as np
 from loguru import logger
 from PIL import Image
+from sklearn.cluster import KMeans
 
 
 resnet_transform = transforms.Compose([
@@ -60,41 +61,8 @@ class Autoencoder(nn.Module):
 YOLO_PERSON_CLASS = 0
 YOLO_BALL_CLASS = 32
 
-def get_prevalent_color(
-        frame: MatLike, 
-        upper_green: np.ndarray=np.array([50, 0, 80]),
-        lower_green: np.ndarray=np.array([80, 255,100]),
-    ) -> list[int]:
-
-    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask_lower = cv2.inRange(hsv_frame, np.array([0,0,0]), lower_green)
-    mask_upper = cv2.inRange(hsv_frame, upper_green, np.array([255, 255, 255]))
-    mask = cv2.bitwise_or(mask_lower, mask_upper)
-    masked_frame = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
-    cv2.imshow("", cv2.cvtColor(masked_frame, cv2.COLOR_HSV2BGR))
-    cv2.waitKey(0)
-
-    hist = cv2.calcHist([masked_frame], [0, 1, 2], None, [10, 10, 10], [1, 256, 1, 256, 1, 256])
-    max_count_idx = np.unravel_index(hist.argmax(), hist.shape)
-
-    b = int(max_count_idx[2] * 32)
-    g = int(max_count_idx[1] * 32)
-    r = int(max_count_idx[0] * 32)
-    bgr_color = [b, g, r]
-
-    return bgr_color
 
 
-def is_referee(frame: MatLike) -> tuple[bool, float]:
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
-
-    total_pixels = frame_binary.size
-    black_pixels = total_pixels - cv2.countNonZero(frame_binary)
-    percentage_black = (black_pixels / total_pixels) * 100
-    referee = percentage_black > 7.0
-
-    return (referee, percentage_black)
 
 @dataclass
 class Predictor:
@@ -112,7 +80,7 @@ class Predictor:
         self.encoder.eval()
         # self.encoder = torch.nn.Sequential(*list(self.encoder.children())[:-1])
 
-        self.clustering = joblib.load(clustering_path)
+        self.clustering = KMeans(n_clusters=2)
 
         self.accepted_classes = accepted_classes
 
@@ -143,6 +111,9 @@ class Predictor:
         x2: int
         y2: int
 
+        upper_green: np.ndarray
+        lower_green: np.ndarray
+
         def __init__(self, frame: MatLike, positions: tuple[int, int, int, int]) -> None:
             self.frame = frame
 
@@ -151,7 +122,40 @@ class Predictor:
             self.x2 = positions[2]
             self.y2 = positions[3]
 
+            self.upper_green = np.array([50, 0, 80])
+            self.lower_green = np.array([80, 255,100])
+
+        def is_referee(self) -> bool:
+            frame_gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
+            _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
+
+            total_pixels = frame_binary.size
+            black_pixels = total_pixels - cv2.countNonZero(frame_binary)
+            percentage_black = (black_pixels / total_pixels) * 100
+            referee = percentage_black > 7.0
+            if referee:
+                rng = np.random.default_rng()
+                cv2.imwrite(f"{rng.random()}.png", self.frame)
+
+            return referee
             
+        def prevalent_color(self) -> list[int]:
+            hsv_frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
+            mask_lower = cv2.inRange(hsv_frame, np.array([0,0,0]), self.lower_green)
+            mask_upper = cv2.inRange(hsv_frame, self.upper_green, np.array([255, 255, 255]))
+            mask = cv2.bitwise_or(mask_lower, mask_upper)
+            masked_frame = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
+
+            hist = cv2.calcHist([masked_frame], [0, 1, 2], None, [10, 10, 10], [1, 256, 1, 256, 1, 256])
+            max_count_idx = np.unravel_index(hist.argmax(), hist.shape)
+
+            b = int(max_count_idx[2] * 32)
+            g = int(max_count_idx[1] * 32)
+            r = int(max_count_idx[0] * 32)
+            bgr_color = [b, g, r]
+
+            return bgr_color
+
     def _crop_image(self, frame: MatLike, box: Boxes) -> ImageCrop:
         coords = box.xyxy[0]
         x1 = int(coords[0])
@@ -214,22 +218,24 @@ class Predictor:
             frame = result.orig_img
 
             image_crops = [self._crop_image(frame, box) for box in boxes]
+
+            # On the first frame, train KMeans to distinguish players by their prevalent color
+            if frame_idx == 0:
+                colors = [ic.prevalent_color() for ic in image_crops if not ic.is_referee()]
+                self.clustering.fit(colors)
+
             for image_crop in image_crops:
                 color = (0, 255, 0)
-                referee, percentage_black = is_referee(image_crop.frame)
-                color = get_prevalent_color(image_crop.frame)
-                if referee:
-                    # color = (0, 0, 255)
-                    referee_count += 1
 
-                text = f"{color}"
-                frame = cv2.putText(
-                            frame, 
-                            text, 
-                            (image_crop.x1, image_crop.y1 - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, 
-                            color)
+                referee = image_crop.is_referee()
+                if referee:
+                    color = (0, 0, 0)
+                    referee_count += 1
+                else:
+                    color = image_crop.prevalent_color()
+                    team_idx = self.clustering.predict([color])[0]
+                    color = self.clustering.cluster_centers_[team_idx]
+
                 frame = cv2.rectangle(
                             result.orig_img, 
                             (image_crop.x1, image_crop.y1), 

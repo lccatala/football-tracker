@@ -70,18 +70,10 @@ class Predictor:
             self, 
             accepted_classes: list[int] = [YOLO_PERSON_CLASS, YOLO_BALL_CLASS], 
             use_gpu: bool = True,
-            autoencoder_path: str = "autoencoder.pth",
-            clustering_path: str = "kmeans.pkl"
         ) -> None:
 
         self.detection_model = YOLO("yolov8m.pt")
-
-        self.encoder = torchvision.models.resnet50(pretrained=True)
-        self.encoder.eval()
-        # self.encoder = torch.nn.Sequential(*list(self.encoder.children())[:-1])
-
         self.clustering = KMeans(n_clusters=2)
-
         self.accepted_classes = accepted_classes
 
         self.device = "cpu"
@@ -122,32 +114,49 @@ class Predictor:
             self.x2 = positions[2]
             self.y2 = positions[3]
 
-            self.upper_green = np.array([50, 0, 80])
-            self.lower_green = np.array([80, 255,100])
+            self.upper_green = np.array([50, 0, 70])
+            self.lower_green = np.array([80, 255,120])
 
-        def is_referee(self) -> bool:
-            frame_gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
-            _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
+        def is_referee(self, v_threshold: int=50) -> bool:
+            frame_hsv = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
+            v_channel = frame_hsv[:, :, 2]
 
-            total_pixels = frame_binary.size
-            black_pixels = total_pixels - cv2.countNonZero(frame_binary)
-            percentage_black = (black_pixels / total_pixels) * 100
-            referee = percentage_black > 7.0
-            if referee:
-                rng = np.random.default_rng()
-                cv2.imwrite(f"{rng.random()}.png", self.frame)
+            low_value_pixels = np.count_nonzero(v_channel < v_threshold)
+
+            total_pixels = self.frame.shape[0] * self.frame.shape[1]
+            black_percentage = (low_value_pixels / total_pixels) * 100
+            referee = black_percentage > 7.0
 
             return referee
             
-        def prevalent_color(self) -> list[int]:
+        def __get_max_count_idx(self) -> tuple:
             hsv_frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
             mask_lower = cv2.inRange(hsv_frame, np.array([0,0,0]), self.lower_green)
             mask_upper = cv2.inRange(hsv_frame, self.upper_green, np.array([255, 255, 255]))
             mask = cv2.bitwise_or(mask_lower, mask_upper)
             masked_frame = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
+            # cv2.imshow("", cv2.cvtColor(masked_frame, cv2.COLOR_HSV2BGR))
+            # cv2.waitKey(0)
 
             hist = cv2.calcHist([masked_frame], [0, 1, 2], None, [10, 10, 10], [1, 256, 1, 256, 1, 256])
             max_count_idx = np.unravel_index(hist.argmax(), hist.shape)
+
+            return max_count_idx
+
+        def _prevalent_color_hsv(self) -> list[int]:
+            max_count_idx = self.__get_max_count_idx()
+
+            b = int(max_count_idx[2] * 32)
+            g = int(max_count_idx[1] * 32)
+            r = int(max_count_idx[0] * 32)
+            bgr = np.uint8([[[b, g, r]]])
+            hsv_color = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[0,0].tolist()
+            print("hsv", hsv_color)
+
+            return hsv_color
+
+        def _prevalent_color_bgr(self) -> list[int]:
+            max_count_idx = self.__get_max_count_idx()
 
             b = int(max_count_idx[2] * 32)
             g = int(max_count_idx[1] * 32)
@@ -194,6 +203,31 @@ class Predictor:
 
 
         return list(frames)
+    def _count_players(self, frame: MatLike, image_crops: list[ImageCrop]) -> tuple[list, MatLike]:
+        REFEREE_IDX = 2
+        player_counts = [0, 0, 0] # Team 1, Team 2, Referees
+        for image_crop in image_crops:
+            color = (0, 255, 0)
+
+            if image_crop.is_referee():
+                player_counts[REFEREE_IDX] += 1
+                color = (0, 0, 0)
+            else:
+                color = image_crop._prevalent_color_bgr()
+                team_idx = self.clustering.predict([color])[0]
+                player_counts[team_idx] += 1
+
+                # color = self.clustering.cluster_centers_[team_idx]
+                # color = np.uint8([[color]])
+                # color = cv2.cvtColor(color, cv2.COLOR_HSV2BGR)[0,0].tolist()
+                # print(color)
+
+            frame = cv2.rectangle(
+                        frame,
+                        (image_crop.x1, image_crop.y1), 
+                        (image_crop.x2, image_crop.y2), 
+                        color, 5)
+        return player_counts, frame
 
     def process_video(self, video_path: str, output_path: str):
         video_frames = self._get_fifth_video_frames(video_path)
@@ -209,9 +243,6 @@ class Predictor:
 
         output_json_list = []
         for frame_idx, result in enumerate(results):
-            home_team_count = 0
-            away_team_count = 0
-            referee_count = 0
             ball_location = (90, 19, 30, 31)
             
             boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
@@ -221,30 +252,14 @@ class Predictor:
 
             # On the first frame, train KMeans to distinguish players by their prevalent color
             if frame_idx == 0:
-                colors = [ic.prevalent_color() for ic in image_crops if not ic.is_referee()]
+                colors = [ic._prevalent_color_bgr() for ic in image_crops if not ic.is_referee()]
                 self.clustering.fit(colors)
 
-            for image_crop in image_crops:
-                color = (0, 255, 0)
-
-                referee = image_crop.is_referee()
-                if referee:
-                    color = (0, 0, 0)
-                    referee_count += 1
-                else:
-                    color = image_crop.prevalent_color()
-                    team_idx = self.clustering.predict([color])[0]
-                    color = self.clustering.cluster_centers_[team_idx]
-
-                frame = cv2.rectangle(
-                            result.orig_img, 
-                            (image_crop.x1, image_crop.y1), 
-                            (image_crop.x2, image_crop.y2), 
-                            color, 5)
+            player_counts, frame = self._count_players(result.orig_img, image_crops)
             cv2.imshow("", frame)
             cv2.waitKey(0)
 
-            json_line = f'{{"frame": {frame_idx*5}, "home_team":{home_team_count}, "away_team": {away_team_count}, "refs": {referee_count}, "ball_loc":{ball_location}}}'
+            json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_location}}}'
             output_json_list.append(json_line)
 
         output_json = "\n".join(output_json_list)

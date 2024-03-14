@@ -9,11 +9,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("video_filename", help="File name of video to analyze", type=str)
     parser.add_argument("--boxes_output_path", required=False, default="data", help="Directory where to save player cutouts", type=str)
+    parser.add_argument("--json_output_path", required=False, default="output.json", help="Json file to store data in", type=str)
+    parser.add_argument("--video_output_path", required=False, default="output.mp4", help="Resulting video file", type=str)
     args = parser.parse_args()
     
 
     predictor = Predictor()
-    predictor.process_video(args.video_filename, "output.json")
+    predictor.process_video(args.video_filename, args.json_output_path, args.video_output_path)
 
 
     # frame_rate = capture.get(cv2.CAP_PROP_FPS)

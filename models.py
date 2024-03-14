@@ -5,6 +5,7 @@ from ultralytics import YOLO
 from tqdm import tqdm
 import cv2
 from cv2.typing import MatLike
+from cv2 import VideoWriter
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -16,25 +17,6 @@ from loguru import logger
 from PIL import Image
 from sklearn.cluster import KMeans
 
-
-resnet_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
-
-
-autoencoder_train_transform = transforms.Compose([
-    transforms.Resize((64, 64)),
-    transforms.ToTensor(),
-])
-
-autoencoder_inference_transform = transforms.Compose([
-    transforms.ToPILImage(),
-    transforms.Resize((64, 64)),
-    transforms.ToTensor(),
-])
 
 class Autoencoder(nn.Module):
     def __init__(self):
@@ -60,8 +42,6 @@ class Autoencoder(nn.Module):
 
 YOLO_PERSON_CLASS = 0
 YOLO_BALL_CLASS = 32
-
-
 
 
 @dataclass
@@ -114,29 +94,27 @@ class Predictor:
             self.x2 = positions[2]
             self.y2 = positions[3]
 
-            self.upper_green = np.array([50, 0, 70])
+            self.upper_green = np.array([70, 0, 50])
             self.lower_green = np.array([80, 255,120])
 
         def is_referee(self, v_threshold: int=50) -> bool:
             frame_hsv = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
             v_channel = frame_hsv[:, :, 2]
 
-            low_value_pixels = np.count_nonzero(v_channel < v_threshold)
+            low_value_pixels = np.count_nonzero(v_channel < v_threshold) #type: ignore
 
             total_pixels = self.frame.shape[0] * self.frame.shape[1]
             black_percentage = (low_value_pixels / total_pixels) * 100
-            referee = black_percentage > 7.0
+            referee = black_percentage > 7.5
 
             return referee
             
         def __get_max_count_idx(self) -> tuple:
             hsv_frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
-            mask_lower = cv2.inRange(hsv_frame, np.array([0,0,0]), self.lower_green)
+            mask_lower = cv2.inRange(hsv_frame, np.array([1,1,1]), self.lower_green)
             mask_upper = cv2.inRange(hsv_frame, self.upper_green, np.array([255, 255, 255]))
             mask = cv2.bitwise_or(mask_lower, mask_upper)
             masked_frame = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
-            # cv2.imshow("", cv2.cvtColor(masked_frame, cv2.COLOR_HSV2BGR))
-            # cv2.waitKey(0)
 
             hist = cv2.calcHist([masked_frame], [0, 1, 2], None, [10, 10, 10], [1, 256, 1, 256, 1, 256])
             max_count_idx = np.unravel_index(hist.argmax(), hist.shape)
@@ -149,9 +127,8 @@ class Predictor:
             b = int(max_count_idx[2] * 32)
             g = int(max_count_idx[1] * 32)
             r = int(max_count_idx[0] * 32)
-            bgr = np.uint8([[[b, g, r]]])
-            hsv_color = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[0,0].tolist()
-            print("hsv", hsv_color)
+            bgr = np.uint8([[[b, g, r]]]) #type: ignore
+            hsv_color = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[0,0].tolist() #type: ignore
 
             return hsv_color
 
@@ -176,13 +153,14 @@ class Predictor:
         image_crop = self.ImageCrop(cropped, (x1, y1, x2, y2))
         return image_crop
 
-    def _get_fifth_video_frames(self, video_path: str) -> list[np.ndarray]:
+    def _get_fifth_video_frames(self, video_path: str) -> tuple[list[np.ndarray], int]:
         capture = cv2.VideoCapture(video_path)
         
+        fps = capture.get(cv2.CAP_PROP_FPS)
         num_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frames = np.zeros((int(num_frames / 5)-1, frame_height, frame_width, 3), dtype=np.uint8)
+        frames = np.zeros((num_frames//5, frame_height, frame_width, 3), dtype=np.uint8)
 
         for i in range(num_frames):
             ret, frame = capture.read()
@@ -201,8 +179,8 @@ class Predictor:
                 break
         frames = frames[:len(frames)-last_zeros_position-1]
 
+        return list(frames), fps
 
-        return list(frames)
     def _count_players(self, frame: MatLike, image_crops: list[ImageCrop]) -> tuple[list, MatLike]:
         REFEREE_IDX = 2
         player_counts = [0, 0, 0] # Team 1, Team 2, Referees
@@ -217,10 +195,7 @@ class Predictor:
                 team_idx = self.clustering.predict([color])[0]
                 player_counts[team_idx] += 1
 
-                # color = self.clustering.cluster_centers_[team_idx]
-                # color = np.uint8([[color]])
-                # color = cv2.cvtColor(color, cv2.COLOR_HSV2BGR)[0,0].tolist()
-                # print(color)
+                color = self.clustering.cluster_centers_[team_idx]
 
             frame = cv2.rectangle(
                         frame,
@@ -229,19 +204,19 @@ class Predictor:
                         color, 5)
         return player_counts, frame
 
-    def process_video(self, video_path: str, output_path: str):
-        video_frames = self._get_fifth_video_frames(video_path)
-        print(f"Got an array of length {len(video_frames)}")
-        print("Converted")
+    def process_video(self, video_path: str, output_path_json: str, output_path_video: str):
+        video_frames, fps = self._get_fifth_video_frames(video_path)
+        print("Video loaded")
 
         results = self.detection_model.predict(
-                video_frames[0], 
+                video_frames, 
                 stream=True, 
                 classes=self.accepted_classes, 
                 device=self.device)
         print("Detecting on video frames...")
 
         output_json_list = []
+        output_frame_list = []
         for frame_idx, result in enumerate(results):
             ball_location = (90, 19, 30, 31)
             
@@ -257,14 +232,24 @@ class Predictor:
 
             player_counts, frame = self._count_players(result.orig_img, image_crops)
             cv2.imshow("", frame)
-            cv2.waitKey(0)
+            cv2.waitKey(20)
 
+            output_frame_list.append(frame)
             json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_location}}}'
             output_json_list.append(json_line)
 
+        print("Writing json...")
         output_json = "\n".join(output_json_list)
-        with open(output_path, "w") as file:
+        with open(output_path_json, "w") as file:
             file.write(output_json)
+
+        print("Saving video...")
+        height, width, _ = output_frame_list[0].shape
+        writer = VideoWriter(output_path_video, cv2.VideoWriter.fourcc(*"mp4v"), fps//5, (width, height))
+        for frame in output_frame_list:
+            writer.write(frame)
+        writer.release()
+
 
 
 

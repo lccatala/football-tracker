@@ -56,7 +56,7 @@ class Predictor:
         self.clustering = KMeans(n_clusters=2)
         self.accepted_classes = accepted_classes
 
-        self.previous_ball_positions = []
+        self.last_known_ball_location = (0,0,0,0)
 
         self.device = "cpu"
         if use_gpu:
@@ -200,41 +200,26 @@ class Predictor:
                         color, 5)
         return player_counts, frame
 
-    def __predict_next_ball_position(self) -> tuple[int, int, int, int]:
-        if len(self.previous_ball_positions) == 1:
-            return self.previous_ball_positions[0]
 
-        # Last resort, not detecting the ball on the first frame 
-        if len(self.previous_ball_positions) == 0:
-            return (0,0,0,0)
+    def _get_ball_location(
+            self, 
+            ball_box_candidates: list[Boxes], 
+        ) -> tuple[tuple[int, int, int, int], bool]:
 
-        curr_position = self.previous_ball_positions[-1]
-        prev_position = self.previous_ball_positions[-2]
-
-        distance = (curr_position[0] - prev_position[0], curr_position[1] - prev_position[1])
-
-        next_position = (
-            curr_position[0] + distance[0], 
-            curr_position[1] + distance[1],
-            self.previous_ball_positions[-1][2],
-            self.previous_ball_positions[-1][3]
-        )
-        self.previous_ball_positions.append(next_position)
-        return next_position
-
-    def _detect_ball(self, ball_box_candidates: list[Boxes], frame: MatLike) -> tuple[tuple[int, int, int, int], bool]:
         if not ball_box_candidates:
-            return self.__predict_next_ball_position(), False
+            return self.last_known_ball_location, False
 
         ball_box = max(ball_box_candidates, key=lambda box: box.conf)#type: ignore
         x1, y1, x2, y2 = self._get_box_coords(ball_box)
-        x = (x1 + x2) // 2
-        y = (y1 + y2) // 2
+        width = y2 - y1
+        height = x2 - x1
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
 
-        coords = (x, y, 30, 31)
-        self.previous_ball_positions.append(coords)
+        loc = (center_x, center_y, width, height)
+        self.last_known_ball_location = loc
 
-        return coords, True
+        return loc, True
 
     def process_video(self, video_path: str, output_path_json: str, output_path_video: str):
         video_frames, fps = self._get_fifth_video_frames(video_path)
@@ -255,9 +240,7 @@ class Predictor:
 
             frame = result.orig_img
             player_crops = [self._crop_image(frame, box) for box in player_boxes]
-            ball_coords, ball_detected = self._detect_ball(ball_box_candidates, frame)
-            if ball_detected:
-                frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
+            ball_coords, ball_detected = self._get_ball_location(ball_box_candidates)
 
             # On the first frame, train KMeans to distinguish players by their prevalent color
             if frame_idx == 0:
@@ -265,6 +248,9 @@ class Predictor:
                 self.clustering.fit(colors)
 
             player_counts, frame = self._count_players(result.orig_img, player_crops)
+
+            if ball_detected:
+                frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
             cv2.imshow("", frame)
             cv2.waitKey(0)
 

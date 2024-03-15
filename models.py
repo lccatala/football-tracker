@@ -56,6 +56,8 @@ class Predictor:
         self.clustering = KMeans(n_clusters=2)
         self.accepted_classes = accepted_classes
 
+        self.previous_ball_positions = []
+
         self.device = "cpu"
         if use_gpu:
             if torch.cuda.is_available():
@@ -143,17 +145,13 @@ class Predictor:
             return bgr_color
 
     def _crop_image(self, frame: MatLike, box: Boxes) -> ImageCrop:
-        coords = box.xyxy[0]
-        x1 = int(coords[0])
-        y1 = int(coords[1])
-        x2 = int(coords[2])
-        y2 = int(coords[3])
+        x1, y1, x2, y2 = self._get_box_coords(box)
 
         cropped = frame[y1:y2, x1:x2]
         image_crop = self.ImageCrop(cropped, (x1, y1, x2, y2))
         return image_crop
 
-    def _get_fifth_video_frames(self, video_path: str) -> tuple[list[np.ndarray], int]:
+    def _get_fifth_video_frames(self, video_path: str) -> tuple[list[np.ndarray], float]:
         capture = cv2.VideoCapture(video_path)
         
         fps = capture.get(cv2.CAP_PROP_FPS)
@@ -204,6 +202,42 @@ class Predictor:
                         color, 5)
         return player_counts, frame
 
+    def __predict_next_ball_position(self) -> tuple[int, int, int, int]:
+        if len(self.previous_ball_positions) == 1:
+            return self.previous_ball_positions[0]
+
+        # Last resort, not detecting the ball on the first frame 
+        if len(self.previous_ball_positions) == 0:
+            return (0,0,0,0)
+
+        curr_position = self.previous_ball_positions[-1]
+        prev_position = self.previous_ball_positions[-2]
+
+        distance = (curr_position[0] - prev_position[0], curr_position[1] - prev_position[1])
+
+        next_position = (
+            curr_position[0] + distance[0], 
+            curr_position[1] + distance[1],
+            self.previous_ball_positions[-1][2],
+            self.previous_ball_positions[-1][3]
+        )
+        self.previous_ball_positions.append(next_position)
+        return next_position
+
+    def _get_ball_coords(self, ball_box_candidates: list[Boxes], frame: MatLike) -> tuple[int, int, int, int]:
+        if not ball_box_candidates:
+            return self.__predict_next_ball_position()
+
+        ball_box = max(ball_box_candidates, key=lambda box: box.conf)#type: ignore
+        x1, y1, x2, y2 = self._get_box_coords(ball_box)
+        x = (x1 + x2) // 2
+        y = (y1 + y2) // 2
+
+        coords = (x, y, 30, 31)
+        self.previous_ball_positions.append(coords)
+
+        return coords
+
     def process_video(self, video_path: str, output_path_json: str, output_path_video: str):
         video_frames, fps = self._get_fifth_video_frames(video_path)
         print("Video loaded")
@@ -218,24 +252,26 @@ class Predictor:
         output_json_list = []
         output_frame_list = []
         for frame_idx, result in enumerate(results):
-            ball_location = (90, 19, 30, 31)
-            
-            boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
-            frame = result.orig_img
+            player_boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
+            ball_box_candidates = [box for box in result.boxes if box.cls == YOLO_BALL_CLASS]
 
-            image_crops = [self._crop_image(frame, box) for box in boxes]
+            frame = result.orig_img
+            player_crops = [self._crop_image(frame, box) for box in player_boxes]
+            ball_coords = self._get_ball_coords(ball_box_candidates, frame)
+            frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
+            print(ball_coords)
 
             # On the first frame, train KMeans to distinguish players by their prevalent color
             if frame_idx == 0:
-                colors = [ic._prevalent_color_bgr() for ic in image_crops if not ic.is_referee()]
+                colors = [ic._prevalent_color_bgr() for ic in player_crops if not ic.is_referee()]
                 self.clustering.fit(colors)
 
-            player_counts, frame = self._count_players(result.orig_img, image_crops)
+            player_counts, frame = self._count_players(result.orig_img, player_crops)
             cv2.imshow("", frame)
-            cv2.waitKey(20)
+            cv2.waitKey(0)
 
             output_frame_list.append(frame)
-            json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_location}}}'
+            json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_coords}}}'
             output_json_list.append(json_line)
 
         print("Writing json...")
@@ -251,8 +287,6 @@ class Predictor:
         writer.release()
 
 
-
-
     def extract_person_boxes(self, video_path: str, output_path: str) -> None:
         os.makedirs(output_path, exist_ok=True)
 
@@ -265,15 +299,21 @@ class Predictor:
         for result in results:
             result.save_crop(output_path, "player")
 
+    def _get_box_coords(self, box: Boxes) -> tuple[int, int, int, int]:
+        coords = box.xyxy[0]
+
+        x1 = int(coords[0])
+        y1 = int(coords[1])
+        x2 = int(coords[2])
+        y2 = int(coords[3])
+
+        return x1, y1, x2, y2
+
     def process_frame(self, frame: MatLike) -> MatLike:
         boxes = self._predict_frame(frame)
         ball_coords_2d = (-1, -1)
         for box in boxes:
-            coords = box.xyxy[0]
-            x1 = int(coords[0])
-            y1 = int(coords[1])
-            x2 = int(coords[2])
-            y2 = int(coords[3])
+            x1, y1, x2, y2 = self._get_box_coords(box)
 
             if box.cls == YOLO_BALL_CLASS:
                 frame = cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0))

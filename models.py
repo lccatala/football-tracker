@@ -222,9 +222,9 @@ class Predictor:
         self.previous_ball_positions.append(next_position)
         return next_position
 
-    def _get_ball_coords(self, ball_box_candidates: list[Boxes], frame: MatLike) -> tuple[int, int, int, int]:
+    def _detect_ball(self, ball_box_candidates: list[Boxes], frame: MatLike) -> tuple[tuple[int, int, int, int], bool]:
         if not ball_box_candidates:
-            return self.__predict_next_ball_position()
+            return self.__predict_next_ball_position(), False
 
         ball_box = max(ball_box_candidates, key=lambda box: box.conf)#type: ignore
         x1, y1, x2, y2 = self._get_box_coords(ball_box)
@@ -234,7 +234,7 @@ class Predictor:
         coords = (x, y, 30, 31)
         self.previous_ball_positions.append(coords)
 
-        return coords
+        return coords, True
 
     def process_video(self, video_path: str, output_path_json: str, output_path_video: str):
         video_frames, fps = self._get_fifth_video_frames(video_path)
@@ -255,9 +255,9 @@ class Predictor:
 
             frame = result.orig_img
             player_crops = [self._crop_image(frame, box) for box in player_boxes]
-            ball_coords = self._get_ball_coords(ball_box_candidates, frame)
-            frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
-            print(ball_coords)
+            ball_coords, ball_detected = self._detect_ball(ball_box_candidates, frame)
+            if ball_detected:
+                frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
 
             # On the first frame, train KMeans to distinguish players by their prevalent color
             if frame_idx == 0:

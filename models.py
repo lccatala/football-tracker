@@ -99,17 +99,15 @@ class Predictor:
             self.upper_green = np.array([70, 0, 50])
             self.lower_green = np.array([80, 255,120])
 
-        def is_referee(self, v_threshold: int=50) -> bool:
-            frame_hsv = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
-            v_channel = frame_hsv[:, :, 2]
-
-            low_value_pixels = np.count_nonzero(v_channel < v_threshold) #type: ignore
-
-            total_pixels = self.frame.shape[0] * self.frame.shape[1]
-            black_percentage = (low_value_pixels / total_pixels) * 100
-            referee = black_percentage > 7.5
-
+        def is_referee(self) -> bool:
+            frame_gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
+            _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
+            total_pixels = frame_binary.size
+            black_pixels = total_pixels - cv2.countNonZero(frame_binary)
+            percentage_black = (black_pixels / total_pixels) * 100
+            referee = percentage_black > 7.0
             return referee
+
             
         def __get_max_count_idx(self) -> tuple:
             hsv_frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)

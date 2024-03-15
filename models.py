@@ -99,21 +99,27 @@ class Predictor:
             self.upper_green = np.array([70, 0, 50])
             self.lower_green = np.array([80, 255,120])
 
-        def is_referee(self) -> bool:
+
+        def _is_referee(self) -> bool:
             frame_gray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2GRAY)
             _, frame_binary = cv2.threshold(frame_gray, 30, 255, cv2.THRESH_BINARY)
+
             total_pixels = frame_binary.size
             black_pixels = total_pixels - cv2.countNonZero(frame_binary)
+
             percentage_black = (black_pixels / total_pixels) * 100
             referee = percentage_black > 7.0
+
             return referee
 
             
         def __get_max_count_idx(self) -> tuple:
             hsv_frame = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
+
             mask_lower = cv2.inRange(hsv_frame, np.array([1,1,1]), self.lower_green)
             mask_upper = cv2.inRange(hsv_frame, self.upper_green, np.array([255, 255, 255]))
             mask = cv2.bitwise_or(mask_lower, mask_upper)
+
             masked_frame = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
 
             hist = cv2.calcHist([masked_frame], [0, 1, 2], None, [10, 10, 10], [1, 256, 1, 256, 1, 256])
@@ -183,7 +189,7 @@ class Predictor:
         for image_crop in image_crops:
             color = (0, 255, 0)
 
-            if image_crop.is_referee():
+            if image_crop._is_referee():
                 player_counts[REFEREE_IDX] += 1
                 color = (0, 0, 0)
             else:
@@ -244,15 +250,15 @@ class Predictor:
 
             # On the first frame, train KMeans to distinguish players by their prevalent color
             if frame_idx == 0:
-                colors = [ic._prevalent_color_bgr() for ic in player_crops if not ic.is_referee()]
+                colors = [ic._prevalent_color_bgr() for ic in player_crops if not ic._is_referee()]
                 self.clustering.fit(colors)
 
             player_counts, frame = self._count_players(result.orig_img, player_crops)
 
             if ball_detected:
                 frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
-            cv2.imshow("", frame)
-            cv2.waitKey(0)
+            cv2.imshow(f"Frame {frame_idx}", frame)
+            cv2.waitKey(20)
 
             output_frame_list.append(frame)
             json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_coords}}}'

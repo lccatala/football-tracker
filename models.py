@@ -258,7 +258,7 @@ class Predictor:
             if ball_detected:
                 frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
             cv2.imshow(f"Frame {frame_idx}", frame)
-            cv2.waitKey(20)
+            cv2.waitKey(0)
 
             output_frame_list.append(frame)
             json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_coords}}}'

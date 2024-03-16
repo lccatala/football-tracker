@@ -236,11 +236,12 @@ class Predictor:
                 stream=True, 
                 classes=self.accepted_classes, 
                 device=self.device)
-        print("Detecting on video frames...")
+        print("Detecting objects on video frames...")
 
         output_json_list = []
         output_frame_list = []
-        for frame_idx, result in enumerate(results):
+        description = "Processing video frames"
+        for frame_idx, result in tqdm(enumerate(results), total=len(video_frames), desc=description):
             player_boxes = [box for box in result.boxes if box.cls == YOLO_PERSON_CLASS]
             ball_box_candidates = [box for box in result.boxes if box.cls == YOLO_BALL_CLASS]
 
@@ -257,8 +258,8 @@ class Predictor:
 
             if ball_detected:
                 frame = cv2.circle(frame, (ball_coords[0], ball_coords[1]), 10, (0, 0, 255), thickness=-1)
-            cv2.imshow(f"Frame {frame_idx}", frame)
-            cv2.waitKey(0)
+            # cv2.imshow(f"Frame {frame_idx}", frame)
+            # cv2.waitKey(20)
 
             output_frame_list.append(frame)
             json_line = f'{{"frame": {frame_idx*5}, "home_team":{player_counts[0]}, "away_team": {player_counts[1]}, "refs": {player_counts[2]}, "ball_loc":{ball_coords}}}'
